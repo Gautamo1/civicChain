@@ -14,7 +14,13 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "We use your location to attach accurate coordinates and address to complaints you submit.",
+        "NSCameraUsageDescription": "We use the camera so you can take a photo of the issue.",
+        "NSPhotoLibraryUsageDescription": "We need access to your photos so you can attach an image to your complaint.",
+        "NSPhotoLibraryAddUsageDescription": "We may save photos to your library if needed."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +28,13 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA",
+        "READ_MEDIA_IMAGES"
+      ]
     },
     "web": {
       "bundler": "metro",

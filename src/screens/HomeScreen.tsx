@@ -8,6 +8,7 @@ import {
   ScrollView,
   FlatList,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { Link } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -51,13 +52,12 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // States filter
-  const [states, setStates] = useState<{ id: string; name: string }[]>([]);
-  const [selectedState, setSelectedState] = useState('All');
+  // User's city from auth metadata
+  const [userCityId, setUserCityId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // Cities filter (dynamic)
-  const [cities, setCities] = useState<{ id: string; name: string }[]>([]);
-  const [selectedCity, setSelectedCity] = useState('All');
+  // Track which complaints user has voted on
+  const [userVotedComplaints, setUserVotedComplaints] = useState<Set<number>>(new Set());
 
   // Status filter
   const [selectedStatus, setSelectedStatus] = useState('all');
@@ -67,6 +67,25 @@ export default function HomeScreen() {
   const [totalCount, setTotalCount] = useState(0);
   const [resolvedCount, setResolvedCount] = useState(0);
 
+  // Fetch user's city and email from auth metadata on mount
+  useEffect(() => {
+    const fetchUserCity = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          const cityId = session.user.user_metadata?.city_id;
+          if (cityId) {
+            setUserCityId(cityId);
+          }
+          setUserEmail(session.user.email || null);
+        }
+      } catch (error) {
+        console.error('Error fetching user city:', error);
+      }
+    };
+    fetchUserCity();
+  }, []);
+
   // ==============================
   // Fetch Complaints + Stats
   // ==============================
@@ -74,21 +93,16 @@ export default function HomeScreen() {
     try {
       setLoading(true);
 
-      // --- Fetch counts ---
-      // Apply state/city filter to counts if selected
+  // --- Fetch counts ---
+  // Apply municipal filter to counts if user has a city
       let totalQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true });
       let openQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'open');
       let resolvedQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'resolved');
 
-      if (selectedState !== 'All') {
-        totalQuery = totalQuery.eq('state_id', selectedState);
-        openQuery = openQuery.eq('state_id', selectedState);
-        resolvedQuery = resolvedQuery.eq('state_id', selectedState);
-      }
-      if (selectedCity !== 'All') {
-        totalQuery = totalQuery.eq('city_id', selectedCity);
-        openQuery = openQuery.eq('city_id', selectedCity);
-        resolvedQuery = resolvedQuery.eq('city_id', selectedCity);
+      if (userCityId) {
+        totalQuery = totalQuery.eq('municipal_id', userCityId);
+        openQuery = openQuery.eq('municipal_id', userCityId);
+        resolvedQuery = resolvedQuery.eq('municipal_id', userCityId);
       }
 
       const { count: total } = await totalQuery;
@@ -99,61 +113,115 @@ export default function HomeScreen() {
       setOpenCount(open ?? 0);
       setResolvedCount(resolved ?? 0);
 
-      // --- Fetch complaints list ---
-      let query = supabase.from('complaints_with_verification_count').select('*').order('created_at', { ascending: false });
+      // --- Fetch complaints list (ordered by votes descending) ---
+      let query = supabase
+        .from('complaints_with_verification_count')
+        .select('id, title, description, location, status, votes, verification_count, created_at, municipal_id')
+        .order('votes', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false });
 
   if (selectedStatus !== 'all') query = query.eq('status', selectedStatus);
-      if (selectedState !== 'All') query = query.eq('state_id', selectedState);
-      if (selectedCity !== 'All') query = query.eq('city_id', selectedCity);
+  if (userCityId) query = query.eq('municipal_id', userCityId);
 
       const { data, error } = await query;
       if (error) throw error;
 
       setComplaints(data || []);
+
+      // --- Fetch user's voted complaints ---
+      if (userEmail) {
+        const { data: votesData } = await supabase
+          .from('user_votes')
+          .select('complaint_id')
+          .eq('user_email', userEmail);
+        
+        if (votesData) {
+          const votedIds = new Set(votesData.map(v => v.complaint_id));
+          setUserVotedComplaints(votedIds);
+        }
+      }
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedState, selectedCity, selectedStatus]);
-
-
-  // Fetch states from Supabase on mount
-  useEffect(() => {
-    const fetchStates = async () => {
-      const { data, error } = await supabase.from('states').select('*').order('name', { ascending: true });
-      if (error) {
-        console.error('Error fetching states:', error);
-        setStates([]);
-      } else {
-        setStates([{ id: 'All', name: 'All' }, ...(data ?? [])]);
-      }
-    };
-    fetchStates();
-  }, []);
-
-  // Fetch cities from Supabase when selectedState changes
-  useEffect(() => {
-    const fetchCities = async () => {
-      let query = supabase.from('cities').select('*').order('name', { ascending: true });
-      if (selectedState !== 'All') {
-        query = query.eq('state_id', selectedState);
-      }
-      const { data, error } = await query;
-      if (error) {
-        console.error('Error fetching cities:', error);
-        setCities([{ id: 'All', name: 'All' }]);
-      } else {
-        setCities([{ id: 'All', name: 'All' }, ...(data ?? [])]);
-      }
-    };
-    fetchCities();
-  }, [selectedState]);
+  }, [userCityId, selectedStatus]);
 
   useEffect(() => {
     fetchComplaintsAndCounts();
   }, [fetchComplaintsAndCounts]);
+
+  // Real-time subscription to complaints table for auto-refresh
+  useEffect(() => {
+    if (!userCityId) return;
+
+    // Subscribe to changes in complaints table for user's city
+    const channel = supabase
+      .channel('home_complaints_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*', // Listen to all events (INSERT, UPDATE, DELETE)
+          schema: 'public',
+          table: 'complaints',
+          filter: `municipal_id=eq.${userCityId}`
+        },
+        (payload) => {
+          console.log('Home complaint change detected:', payload);
+          // Refresh complaints list when any change occurs
+          fetchComplaintsAndCounts();
+        }
+      )
+      .subscribe();
+
+    // Cleanup subscription on unmount
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userCityId, fetchComplaintsAndCounts]);
+
+  // Handle voting on a complaint
+  const handleVote = async (complaintId: number, currentVotes: number) => {
+    if (!userEmail) {
+      Alert.alert('Error', 'You must be logged in to vote');
+      return;
+    }
+
+    // Check if user has already voted
+    if (userVotedComplaints.has(complaintId)) {
+      Alert.alert('Already Voted', 'You have already voted on this complaint');
+      return;
+    }
+
+    try {
+      // Record the vote in user_votes table
+      const { error: voteError } = await supabase
+        .from('user_votes')
+        .insert({
+          user_email: userEmail,
+          complaint_id: complaintId
+        });
+
+      if (voteError) throw voteError;
+
+      // Increment vote count
+      const { error: updateError } = await supabase
+        .from('complaints')
+        .update({ votes: (currentVotes || 0) + 1 })
+        .eq('id', complaintId);
+
+      if (updateError) throw updateError;
+
+      // Update local state
+      setUserVotedComplaints(prev => new Set(prev).add(complaintId));
+
+      Alert.alert('Success', 'Your vote has been recorded!');
+      // Refresh will happen automatically via realtime subscription
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to vote');
+    }
+  };
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -181,36 +249,6 @@ export default function HomeScreen() {
           <Text style={[styles.statNumber, { color: '#1976d2' }]}>{totalCount}</Text>
           <Text style={styles.statLabel}>TOTAL</Text>
         </View>
-      </View>
-
-      {/* States Filter */}
-      <View style={styles.filterSection}>
-        <Text style={styles.filterTitle}>State</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {states.map((state) => (
-            <FilterPill
-              key={state.id}
-              label={state.name}
-              isSelected={selectedState === state.id}
-              onPress={() => setSelectedState(state.id)}
-            />
-          ))}
-        </ScrollView>
-      </View>
-
-      {/* City Filter (dynamic) */}
-      <View style={styles.filterSection}>
-        <Text style={styles.filterTitle}>City</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {cities.map((city) => (
-            <FilterPill
-              key={city.id}
-              label={city.name}
-              isSelected={selectedCity === city.id}
-              onPress={() => setSelectedCity(city.id)}
-            />
-          ))}
-        </ScrollView>
       </View>
 
       {/* Status Filter */}
@@ -254,12 +292,46 @@ export default function HomeScreen() {
         <FlatList
           data={complaints}
           keyExtractor={(item) => item.id.toString()}
-          renderItem={({ item }) => (
-            <View style={styles.complaintCard}>
-              <Text style={styles.complaintTitle}>{item.title}</Text>
-              <Text numberOfLines={2}>{item.description}</Text>
-            </View>
-          )}
+          renderItem={({ item }) => {
+            const hasVoted = userVotedComplaints.has(item.id);
+            return (
+              <View style={styles.complaintCard}>
+                <Pressable 
+                  onPress={() => {
+                    Alert.alert(
+                      item.title,
+                      `${item.description}\n\nLocation: ${item.location || 'N/A'}\nStatus: ${item.status}\nVotes: ${item.votes || 0}`,
+                      [{ text: 'OK' }]
+                    );
+                  }}
+                >
+                  <Text style={styles.complaintTitle}>{item.title}</Text>
+                  <Text numberOfLines={2} style={styles.complaintDescription}>{item.description}</Text>
+                </Pressable>
+                
+                <View style={styles.complaintFooter}>
+                  <View style={styles.voteInfo}>
+                    <Ionicons name="arrow-up-circle" size={20} color="#6c757d" />
+                    <Text style={styles.voteCount}>{item.votes || 0} votes</Text>
+                  </View>
+                  <Pressable 
+                    style={[styles.voteButton, hasVoted && styles.voteButtonDisabled]}
+                    onPress={() => handleVote(item.id, item.votes)}
+                    disabled={hasVoted}
+                  >
+                    <Ionicons 
+                      name={hasVoted ? "checkmark-circle" : "arrow-up-circle-outline"} 
+                      size={20} 
+                      color={hasVoted ? "#6c757d" : "#007bff"} 
+                    />
+                    <Text style={[styles.voteButtonText, hasVoted && styles.voteButtonTextDisabled]}>
+                      {hasVoted ? 'Voted' : 'Vote'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            );
+          }}
           ListHeaderComponent={ListHeader}
           ListEmptyComponent={EmptyList}
           contentContainerStyle={styles.scrollContainer}
@@ -365,6 +437,11 @@ const styles = StyleSheet.create({
   pillTextInactive: {
     color: '#495057',
   },
+  dropdownToggle: { flexDirection: 'row', justifyContent: 'space-between', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#e9ecef', backgroundColor: '#fff' },
+  dropdownToggleActive: { borderColor: '#2f95dc' },
+  dropdownToggleInactive: { borderColor: '#dee2e6' },
+  dropdownList: { marginTop: 8, borderRadius: 8, borderWidth: 1, borderColor: '#e9ecef', backgroundColor: '#fff' },
+  dropdownItem: { padding: 12, borderBottomWidth: 1, borderBottomColor: '#f1f3f5' },
   emptyContainer: {
     marginTop: 60,
     alignItems: 'center',
@@ -395,6 +472,51 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     marginBottom: 4,
+  },
+  complaintDescription: {
+    fontSize: 14,
+    color: '#495057',
+    marginBottom: 12,
+  },
+  complaintFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e9ecef',
+  },
+  voteInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  voteCount: {
+    fontSize: 14,
+    color: '#6c757d',
+    fontWeight: '600',
+  },
+  voteButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#e7f3ff',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  voteButtonText: {
+    fontSize: 14,
+    color: '#007bff',
+    fontWeight: '600',
+  },
+  voteButtonDisabled: {
+    backgroundColor: '#e9ecef',
+    opacity: 0.6,
+  },
+  voteButtonTextDisabled: {
+    color: '#6c757d',
   },
   fabContainer: {
     position: 'absolute',

@@ -13,3 +13,6 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: false,
   },
 });
+
+// Centralize storage bucket IDs used by the app
+export const COMPLAINTS_BUCKET = 'complaints';
