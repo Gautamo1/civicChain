@@ -10,7 +10,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import { Link } from 'expo-router';
+import { Link, useFocusEffect } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 
@@ -66,6 +66,7 @@ export default function HomeScreen() {
   const [openCount, setOpenCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [resolvedCount, setResolvedCount] = useState(0);
+  const [verifiedCount, setVerifiedCount] = useState(0);
 
   // Fetch user's city and email from auth metadata on mount
   useEffect(() => {
@@ -86,6 +87,27 @@ export default function HomeScreen() {
     fetchUserCity();
   }, []);
 
+  // Re-fetch user city when screen comes into focus (e.g., after city change)
+  useFocusEffect(
+    useCallback(() => {
+      const refreshUserCity = async () => {
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.user) {
+            const cityId = session.user.user_metadata?.city_id;
+            if (cityId && cityId !== userCityId) {
+              // City has changed, update it
+              setUserCityId(cityId);
+            }
+          }
+        } catch (error) {
+          console.error('Error refreshing user city:', error);
+        }
+      };
+      refreshUserCity();
+    }, [userCityId])
+  );
+
   // ==============================
   // Fetch Complaints + Stats
   // ==============================
@@ -96,22 +118,26 @@ export default function HomeScreen() {
   // --- Fetch counts ---
   // Apply municipal filter to counts if user has a city
       let totalQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true });
-      let openQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'open');
+  let openQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'pending');
       let resolvedQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'resolved');
+      let verifiedQuery: any = supabase.from('complaints_with_verification_count').select('*', { count: 'exact', head: true }).eq('status', 'verified');
 
       if (userCityId) {
         totalQuery = totalQuery.eq('municipal_id', userCityId);
         openQuery = openQuery.eq('municipal_id', userCityId);
         resolvedQuery = resolvedQuery.eq('municipal_id', userCityId);
+        verifiedQuery = verifiedQuery.eq('municipal_id', userCityId);
       }
 
       const { count: total } = await totalQuery;
       const { count: open } = await openQuery;
       const { count: resolved } = await resolvedQuery;
+      const { count: verified } = await verifiedQuery;
 
       setTotalCount(total ?? 0);
       setOpenCount(open ?? 0);
       setResolvedCount(resolved ?? 0);
+      setVerifiedCount(verified ?? 0);
 
       // --- Fetch complaints list (ordered by votes descending) ---
       let query = supabase
@@ -231,42 +257,61 @@ export default function HomeScreen() {
   // ==============================
   // Header (filters + stats)
   // ==============================
-  const ListHeader = () => (
-    <>
-      <Text style={styles.subtitle}>Make your city better</Text>
+  const ListHeader = () => {
+    const totalDisplay = selectedStatus === 'all' ? totalCount : complaints.length;
+    return (
+      <>
+        <Text style={styles.subtitle}>Make your city better</Text>
 
-      {/* Stats */}
-      <View style={styles.statsContainer}>
-        <View style={[styles.statCard, { backgroundColor: '#ffebee' }]}>
-          <Text style={[styles.statNumber, { color: '#d32f2f' }]}>{openCount}</Text>
-          <Text style={styles.statLabel}>OPEN</Text>
+        {/* Stats */}
+        <View style={styles.statsContainer}>
+          <Pressable
+            style={[styles.statCard, selectedStatus === 'pending' ? styles.statCardActive : null, { backgroundColor: '#ffebee' }]}
+            onPress={() => setSelectedStatus('pending')}
+          >
+            <Text style={[styles.statNumber, { color: '#d32f2f' }]}>{openCount}</Text>
+            <Text style={styles.statLabel}>OPEN</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.statCard, selectedStatus === 'resolved' ? styles.statCardActive : null, { backgroundColor: '#e8f5e9' }]}
+            onPress={() => setSelectedStatus('resolved')}
+          >
+            <Text style={[styles.statNumber, { color: '#388e3c' }]}>{resolvedCount}</Text>
+            <Text style={styles.statLabel}>RESOLVED</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.statCard, selectedStatus === 'verified' ? styles.statCardActive : null, { backgroundColor: '#f3e8ff' }]}
+            onPress={() => setSelectedStatus('verified')}
+          >
+            <Text style={[styles.statNumber, { color: '#6a1b9a' }]}>{verifiedCount}</Text>
+            <Text style={styles.statLabel}>VERIFIED</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.statCard, selectedStatus === 'all' ? styles.statCardActive : null, { backgroundColor: '#e3f2fd' }]}
+            onPress={() => setSelectedStatus('all')}
+          >
+            <Text style={[styles.statNumber, { color: '#1976d2' }]}>{totalDisplay}</Text>
+            <Text style={styles.statLabel}>TOTAL</Text>
+          </Pressable>
         </View>
-        <View style={[styles.statCard, { backgroundColor: '#e8f5e9' }]}>
-          <Text style={[styles.statNumber, { color: '#388e3c' }]}>{resolvedCount}</Text>
-          <Text style={styles.statLabel}>RESOLVED</Text>
-        </View>
-        <View style={[styles.statCard, { backgroundColor: '#e3f2fd' }]}>
-          <Text style={[styles.statNumber, { color: '#1976d2' }]}>{totalCount}</Text>
-          <Text style={styles.statLabel}>TOTAL</Text>
-        </View>
-      </View>
 
-      {/* Status Filter */}
-      <View style={styles.filterSection}>
-        <Text style={styles.filterTitle}>Status</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {STATUSES.map((status) => (
-            <FilterPill
-              key={status}
-              label={status}
-              isSelected={selectedStatus === status}
-              onPress={() => setSelectedStatus(status)}
-            />
-          ))}
-        </ScrollView>
-      </View>
-    </>
-  );
+        {/* Status Filter */}
+        <View style={styles.filterSection}>
+          <Text style={styles.filterTitle}>Status</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {STATUSES.map((status) => (
+              <FilterPill
+                key={status}
+                label={status}
+                isSelected={selectedStatus === status}
+                onPress={() => setSelectedStatus(status)}
+              />
+            ))}
+          </ScrollView>
+        </View>
+      </>
+    );
+  };
 
   // ==============================
   // Empty List
@@ -396,6 +441,11 @@ const styles = StyleSheet.create({
   statNumber: {
     fontSize: 28,
     fontWeight: 'bold',
+  },
+  statCardActive: {
+    borderWidth: 2,
+    borderColor: '#2f95dc',
+    transform: [{ scale: 1.02 }],
   },
   statLabel: {
     fontSize: 12,

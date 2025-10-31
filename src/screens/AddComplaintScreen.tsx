@@ -222,7 +222,7 @@ export default function AddComplaintScreen() {
         title,
         description,
         photo_url: publicUrl,
-        location: address || `${lat}, ${lon}`,
+        locationAB: address || `${lat}, ${lon}`,
         municipal_id: String(municipalId),
         latitude: Number(lat.toFixed(8)),
         longitude: Number(lon.toFixed(8)),

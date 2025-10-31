@@ -1,7 +1,7 @@
 // src/screens/ProfileScreen.tsx
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Pressable, Linking, Alert, FlatList, ActivityIndicator } from 'react-native';
-import { useRouter } from 'expo-router';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, Pressable, Linking, Alert, FlatList, ActivityIndicator, ScrollView } from 'react-native';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { supabase } from '../lib/supabase';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -15,6 +15,12 @@ export default function ProfileScreen() {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [cityName, setCityName] = useState('');
+  const [cityId, setCityId] = useState('');
+
+  // City change functionality
+  const [showCitySelector, setShowCitySelector] = useState(false);
+  const [availableCities, setAvailableCities] = useState<{ id: string; name: string }[]>([]);
+  const [updatingCity, setUpdatingCity] = useState(false);
 
   // Real user complaints
   const points = 120; // mock points (TODO: calculate from real data)
@@ -31,9 +37,10 @@ export default function ProfileScreen() {
           setDisplayName(session.user.user_metadata?.display_name || 'User');
           
           // Get city ID directly from user metadata
-          const cityId = session.user.user_metadata?.city_id;
-          if (cityId) {
-            setCityName(String(cityId));
+          const cityIdFromMeta = session.user.user_metadata?.city_id;
+          if (cityIdFromMeta) {
+            setCityName(String(cityIdFromMeta));
+            setCityId(String(cityIdFromMeta));
           }
         }
       } catch (error) {
@@ -45,6 +52,63 @@ export default function ProfileScreen() {
     fetchUserData();
   }, []);
 
+  // Fetch available cities for city selector
+  useEffect(() => {
+    const fetchCities = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('municipals')
+          .select('id')
+          .order('id', { ascending: true });
+        
+        if (error) {
+          console.error('Error fetching cities:', error);
+          setAvailableCities([]);
+        } else {
+          const rows = (data ?? []).map((row: any) => ({ 
+            id: row.id as string, 
+            name: String(row.id) 
+          }));
+          setAvailableCities(rows);
+        }
+      } catch (error) {
+        console.error('Error fetching cities:', error);
+      }
+    };
+    fetchCities();
+  }, []);
+
+  // Re-fetch user data when screen comes into focus (e.g., after city change)
+  useFocusEffect(
+    useCallback(() => {
+      const refreshUserData = async () => {
+        try {
+          // Reset loading state in case it was left on
+          setUpdatingCity(false);
+          setShowCitySelector(false);
+          
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.user) {
+            const newDisplayName = session.user.user_metadata?.display_name || 'User';
+            const newCityId = session.user.user_metadata?.city_id;
+            
+            // Update if changed
+            if (newDisplayName !== displayName) {
+              setDisplayName(newDisplayName);
+            }
+            if (newCityId && newCityId !== cityId) {
+              setCityId(String(newCityId));
+              setCityName(String(newCityId));
+            }
+          }
+        } catch (error) {
+          console.error('Error refreshing user data:', error);
+        }
+      };
+      refreshUserData();
+    }, [cityId, displayName])
+  );
+
   // Fetch user's complaints
   const fetchUserComplaints = async () => {
     if (!email) return;
@@ -53,7 +117,7 @@ export default function ProfileScreen() {
     try {
       const { data, error } = await supabase
         .from('complaints')
-        .select('id, title, description, category_id, status, created_at, updated_at, submitted_date')
+        .select('id, title, description, category_id, status, created_at, updated_at, submitted_date, votes')
         .eq('created_by', email)
         .order('created_at', { ascending: false });
       
@@ -308,7 +372,7 @@ export default function ProfileScreen() {
           photo_url: urlData.publicUrl,
           latitude,
           longitude,
-          location: address,
+          locationAB: address,
           status: 'pending',
           submitted_date: futureDate.toISOString()
         })
@@ -324,8 +388,16 @@ export default function ProfileScreen() {
   };
 
   // Check if complaint status was recently updated by admin (within last 7 days)
+  // Only show banner for resolved/verified status (admin actions), not pending
   const isRecentlyUpdated = (complaint: any): boolean => {
     if (!complaint.updated_at || !complaint.submitted_date) return false;
+    
+    // Only show banner for admin status updates (resolved or verified)
+    // Ignore pending status (could be user resubmission)
+    if (complaint.status !== 'resolved' && complaint.status !== 'verified') {
+      return false;
+    }
+    
     const updated = new Date(complaint.updated_at);
     const submitted = new Date(complaint.submitted_date);
     const daysSinceUpdate = (Date.now() - updated.getTime()) / (1000 * 60 * 60 * 24);
@@ -333,6 +405,7 @@ export default function ProfileScreen() {
     
     // Debug logging
     console.log('Complaint:', complaint.id, {
+      status: complaint.status,
       updated_at: complaint.updated_at,
       submitted_date: complaint.submitted_date,
       isUpdatedAfterSubmit,
@@ -382,6 +455,46 @@ export default function ProfileScreen() {
     }
   };
 
+  // Handle city change
+  const handleCityChange = async (newCityId: string) => {
+    try {
+      setUpdatingCity(true);
+      
+      // Update user metadata with new city_id
+      const { error } = await supabase.auth.updateUser({
+        data: {
+          city_id: newCityId
+        }
+      });
+
+      if (error) throw error;
+
+      // Update local state
+      setCityId(newCityId);
+      setCityName(newCityId);
+      setShowCitySelector(false);
+      setUpdatingCity(false); // Reset loading state before navigation
+
+      Alert.alert(
+        'City Updated', 
+        'Your city has been changed. The app will refresh to load data for your new city.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              // Navigate to home tab to trigger refresh of all city-dependent screens
+              router.replace('/(tabs)/home');
+            }
+          }
+        ]
+      );
+      
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to update city');
+      setUpdatingCity(false);
+    }
+  };
+
   if (loading) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -399,10 +512,54 @@ export default function ProfileScreen() {
         <Text style={styles.cardValue}>{displayName}</Text>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>City</Text>
-        <Text style={styles.cardValue}>{cityName || 'Not set'}</Text>
-      </View>
+      <Pressable style={styles.card} onPress={() => setShowCitySelector(!showCitySelector)}>
+        <View>
+          <Text style={styles.cardTitle}>City</Text>
+          <Text style={styles.cardValue}>{cityName || 'Not set'}</Text>
+        </View>
+        <Text style={styles.linkText}>{showCitySelector ? 'Cancel' : 'Change'}</Text>
+      </Pressable>
+
+      {showCitySelector && (
+        <View style={styles.citySelectorContainer}>
+          {availableCities.length === 0 ? (
+            <ActivityIndicator style={{ marginVertical: 16 }} />
+          ) : (
+            <ScrollView 
+              style={styles.cityList}
+              nestedScrollEnabled={true}
+              showsVerticalScrollIndicator={true}
+            >
+              {availableCities.map((city) => (
+                <Pressable
+                  key={city.id}
+                  style={[
+                    styles.cityOption,
+                    cityId === city.id && styles.cityOptionSelected
+                  ]}
+                  onPress={() => handleCityChange(city.id)}
+                  disabled={updatingCity || cityId === city.id}
+                >
+                  <Text style={[
+                    styles.cityOptionText,
+                    cityId === city.id && styles.cityOptionTextSelected
+                  ]}>
+                    {city.name}
+                  </Text>
+                  {cityId === city.id && (
+                    <Text style={styles.currentCityBadge}>Current</Text>
+                  )}
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+          {updatingCity && (
+            <View style={styles.updatingOverlay}>
+              <ActivityIndicator size="large" color="#2f95dc" />
+            </View>
+          )}
+        </View>
+      )}
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Points</Text>
@@ -608,5 +765,59 @@ const styles = StyleSheet.create({
     color: '#d32f2f',
     fontWeight: '600',
     fontSize: 12,
+  },
+  citySelectorContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+    padding: 8,
+  },
+  cityList: {
+    maxHeight: 300,
+  },
+  cityOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 6,
+    marginVertical: 4,
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+  },
+  cityOptionSelected: {
+    backgroundColor: '#e3f2fd',
+    borderColor: '#2f95dc',
+  },
+  cityOptionText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#495057',
+  },
+  cityOptionTextSelected: {
+    color: '#1976d2',
+  },
+  currentCityBadge: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2f95dc',
+    backgroundColor: '#e3f2fd',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+  },
+  updatingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 8,
   },
 });
